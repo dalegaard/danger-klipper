@@ -893,7 +893,8 @@ commands to manage the LED's color settings).
 ### [output_pin]
 
 The following command is available when an
-[output_pin config section](Config_Reference.md#output_pin) is
+[output_pin config section](Config_Reference.md#output_pin) or
+[pwm_tool config section](Config_Reference.md#pwm_tool) is
 enabled.
 
 #### SET_PIN
@@ -1348,8 +1349,11 @@ The toolhead module is automatically loaded.
 
 #### SET_VELOCITY_LIMIT
 `SET_VELOCITY_LIMIT [VELOCITY=<value>] [ACCEL=<value>]
-[ACCEL_TO_DECEL=<value>] [SQUARE_CORNER_VELOCITY=<value>]`: Modify the
-printer's velocity limits.
+[ACCEL_TO_DECEL=<value>] [SQUARE_CORNER_VELOCITY=<value>]`: This
+command can alter the velocity limits that were specified in the
+printer config file. See the
+[printer config section](Config_Reference.md#printer) for a
+description of each parameter.
 
 ### [tuning_tower]
 
@@ -1464,7 +1468,7 @@ adjustments to each Z stepper to compensate for tilt. See the PROBE command for
 details on the optional probe parameters. The optional `HORIZONTAL_MOVE_Z`
 value overrides the `horizontal_move_z` option specified in the config file.
 The follwing commands are availabe when the parameter "extra_points" is
-configured in the z_tilt_section:
+configured in the z_tilt_ng section:
 - `Z_TILT_CALIBRATE [AVGLEN=<value>]`: This command does multiple probe
   runs similar to Z_TILT_ADJUST, but with the additional points given in
   "extra_points". This leads to a more balanced bed adjustment in case the
