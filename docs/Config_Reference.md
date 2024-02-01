@@ -292,16 +292,70 @@ max_z_accel:
 [stepper_z]
 ```
 
-### Linear Delta Kinematics
+### ⚠️ Cartesian Kinematics with limits for X and Y axes
 
-See [example-delta.cfg](../config/example-delta.cfg) for an example
-linear delta kinematics config file. See the
-[delta calibrate guide](Delta_Calibrate.md) for information on
-calibration.
+Behaves exactly the as cartesian kinematics, but allows to set a velocity and
+acceleration limit for X and Y axis. This also makes command [`SET_KINEMATICS_LIMIT`](./G-Codes.md#⚠️-set_kinematics_limit) available to sets these limits at runtime.
 
-Only parameters specific to linear delta printers are described here -
-see [common kinematic settings](#common-kinematic-settings) for
-available parameters.
+
+```
+[printer]
+kinematics: limited_cartesian
+max_x_velocity:
+#   This sets the maximum velocity (in mm/s) of movement along the x
+#   axis. This setting can be used to restrict the maximum speed of
+#   the x stepper motor. The default is to use max_velocity for
+#   max_x_velocity.
+max_y_velocity:
+#   This sets the maximum velocity (in mm/s) of movement along the y
+#   axis. This setting can be used to restrict the maximum speed of
+#   the y stepper motor. The default is to use max_velocity for
+#   max_x_velocity.
+max_z_velocity:
+#   See cartesian above.
+max_velocity:
+#   In order to get maximum velocity gains on diagonals, this should be equal or
+#   greater than the hypotenuse (sqrt(x*x + y*y)) of max_x_velocity and
+#   max_y_velocity.
+max_x_accel:
+#   This sets the maximum acceleration (in mm/s^2) of movement along
+#   the x axis. It limits the acceleration of the x stepper motor. The
+#   default is to use max_accel for max_x_accel.
+max_y_accel:
+#   This sets the maximum acceleration (in mm/s^2) of movement along
+#   the y axis. It limits the acceleration of the y stepper motor. The
+#   default is to use max_accel for max_y_accel.
+max_z_accel:
+# See cartesian above.
+max_accel:
+# See cartesian above.
+scale_xy_accel: False
+#   When true, scales the XY limits by the current tool head acceleration.
+#   The factor is: slicer accel / hypot(max_x_accel, max_y_accel).
+#   See below.
+```
+
+If scale_xy_accel is `False`, the acceleration set by `max_accel`, M204 or
+SET_VELOCITY_LIMIT, acts as a third limit. In that case, this module doesn't
+apply limitations on moves having an acceleration lower than `max_x_accel`` and
+`max_y_accel`. When scale_xy_accel is `True`, `max_x_accel` and `max_y_accel`
+are scaled by the ratio of the dynamically set acceleration and the hypotenuse
+of max_x_accel and `max_y_accel`, as reported from `SET_KINEMATICS_LIMIT`. This
+implies that the actual acceleration will always depend on the direction. For
+example, these settings:
+
+```
+[printer]
+max_x_accel: 12000
+max_y_accel: 9000
+scale_xy_accel: true
+```
+
+`SET_KINEMATICS_LIMIT` will report a maximum acceleration of 15000 mm/s^2 on 37°
+diagonals. If the slicer emit `M204 S3000` (3000 mm/s^2 accel). On these 37° and
+143° diagonals, the toolhead will accelerate at 3000 mm/s^2. On the X axis, the
+acceleration will be  12000 * 3000 / 15000 = 2400 mm/s^2, and 18000 mm/s^2 for
+pure Y moves.
 
 ```
 [printer]
@@ -486,6 +540,37 @@ max_z_accel:
 # The stepper_z section is used to describe the stepper controlling
 # the Z axis.
 [stepper_z]
+```
+
+### ⚠️ CoreXY Kinematics with limits for X and Y axes
+
+Behaves exactly the as CoreXY kinematics, but allows to set a acceleration limit
+for X and Y axis.
+
+There is no velocity limits for X and Y, since on a CoreXY the pull-out velocity
+are identical on both axes.
+
+
+```
+[printer]
+kinematics: limited_corexy
+max_z_velocity:
+#   See CoreXY above.
+max_x_accel:
+#   This sets the maximum acceleration (in mm/s^2) of movement along
+#   the x axis. It limits the acceleration of the x stepper motor. The
+#   default is to use max_accel for max_x_accel.
+max_y_accel:
+#   This sets the maximum acceleration (in mm/s^2) of movement along
+#   the y axis. It limits the acceleration of the y stepper motor. The
+#   default is to use max_accel for max_y_accel.
+max_z_accel:
+# See CoreXY above.
+max_accel:
+# See CoreXY above..
+scale_xy_accel:
+#   When True, scales the XY limits by the current tool head acceleration.
+#   The factor is: slicer accel / max(max_x_accel, max_y_accel).
 ```
 
 ### CoreXZ Kinematics
@@ -902,6 +987,11 @@ max_temp:
 #   heater and sensor hardware failures. Set this range just wide
 #   enough so that reasonable temperatures do not result in an error.
 #   These parameters must be provided.
+per_move_pressure_advance: False
+#   If true, uses pressure advance constant from trapq when processing moves
+#   This causes changes to pressure advance be taken into account immediately,
+#   for all moves in the current queue, rather than ~250ms later once the queue gets flushed
+
 ```
 
 ### [heater_bed]
@@ -1594,7 +1684,9 @@ file for a Marlin compatible M808 G-Code macro.
 [sdcard_loop]
 ```
 
-### [force_move]
+### ⚠ [force_move]
+
+This module is enabled by default in DangerKlipper!
 
 Support manually moving stepper motors for diagnostic purposes. Note,
 using this feature may place the printer in an invalid state - see the
@@ -1602,9 +1694,9 @@ using this feature may place the printer in an invalid state - see the
 
 ```
 [force_move]
-#enable_force_move: False
+#enable_force_move: True
 #   Set to true to enable FORCE_MOVE and SET_KINEMATIC_POSITION
-#   extended G-Code commands. The default is false.
+#   extended G-Code commands. The default is true.
 ```
 
 ### [pause_resume]
