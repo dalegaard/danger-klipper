@@ -39,6 +39,15 @@ the following strings: "adjust", "fine".
 - `current_screw`: The index for the current screw being adjusted.
 - `accepted_screws`: The number of accepted screws.
 
+## belay
+
+The following information is available in
+[belay some_name](Config_Reference.md#belay) objects:
+- `printer["belay <config_name>"].last_state`: Returns True if the belay's
+  sensor is in a triggered state (indicating its slider is compressed).
+- `printer["belay <config_name>"].enabled`: Returns True if the belay is
+  currently enabled.
+
 ## configfile
 
 The following information is available in the `configfile` object
@@ -465,6 +474,7 @@ The following information is available in
 
 [bme280 config_section_name](Config_Reference.md#bmp280bme280bme680-temperature-sensor),
 [htu21d config_section_name](Config_Reference.md#htu21d-sensor),
+[sht3x config_section_name](Config_Reference.md#sht31-sensor),
 [lm75 config_section_name](Config_Reference.md#lm75-temperature-sensor),
 [temperature_host config_section_name](Config_Reference.md#host-temperature-sensor)
 and
@@ -472,7 +482,7 @@ and
 objects:
 - `temperature`: The last read temperature from the sensor.
 - `humidity`, `pressure`, `gas`: The last read values from the sensor
-  (only on bme280, htu21d, and lm75 sensors).
+  (only on bme280, htu21d, sht3x and lm75 sensors).
 
 ## temperature_fan
 
@@ -531,7 +541,7 @@ The following information is available in the `toolhead` object
   limit value (eg, `axis_minimum.x`, `axis_maximum.z`).
 - For Delta printers the `cone_start_z` is the max z height at
   maximum radius (`printer.toolhead.cone_start_z`).
-- `max_velocity`, `max_accel`, `max_accel_to_decel`,
+- `max_velocity`, `max_accel`, `minimum_cruise_ratio`,
   `square_corner_velocity`: The current printing limits that are in
   effect. This may differ from the config file settings if a
   `SET_VELOCITY_LIMIT` (or `M204`) command alters them at run-time.
@@ -548,6 +558,14 @@ on a cartesian, hybrid_corexy or hybrid_corexz robot
   "INACTIVE" and "PRIMARY".
 - `carriage_1`: The mode of the carriage 1. Possible values are:
   "INACTIVE", "PRIMARY", "COPY", and "MIRROR".
+
+## trad_rack
+
+The following informatin is available in the
+[trad_rack](Config_Reference.md#trad_rack) object:
+- `curr_lane`: The lane the selector is currently positioned at.
+- `active_lane`: The lane currently loaded in the toolhead.
+- `selector_homed`: Whether or not the selector axis is homed.
 
 ## virtual_sdcard
 

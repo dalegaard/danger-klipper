@@ -253,6 +253,8 @@ FieldFormatters.update(
         "s2vsa": (lambda v: "1(ShortToSupply_A!)" if v else ""),
         "s2vsb": (lambda v: "1(ShortToSupply_B!)" if v else ""),
         "adc_temp": (lambda v: "0x%04x(%.1fC)" % (v, ((v - 2038) / 7.7))),
+        "adc_vsupply": (lambda v: "0x%04x(%.3fV)" % (v, v * 0.009732)),
+        "adc_ain": (lambda v: "0x%04x(%.3fmV)" % (v, v * 0.3052)),
     }
 )
 
@@ -284,7 +286,7 @@ class TMC2240CurrentHelper:
         self.current_change_dwell_time = config.getfloat(
             "current_change_dwell_time", 0.5, above=0.0
         )
-        self.prev_current = self.run_current
+        self._prev_current = self.run_current
         self.req_hold_current = self.hold_current
         current_range = self._calc_current_range(self.run_current)
         self.fields.set_field("current_range", current_range)
@@ -356,7 +358,13 @@ class TMC2240CurrentHelper:
             self._home_current,
         )
 
-    def set_current(self, run_current, hold_current, print_time):
+    def set_current(self, run_current, hold_current, print_time, force=False):
+        if (
+            run_current == self._prev_current
+            and hold_current == self.req_hold_current
+            and not force
+        ):
+            return
         self.req_hold_current = hold_current
         gscaler, irun, ihold = self._calc_current(run_current, hold_current)
         val = self.fields.set_field("globalscaler", gscaler)
