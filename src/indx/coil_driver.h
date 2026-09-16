@@ -35,6 +35,11 @@ struct coil_driver {
     void
     start_tune(bool want_details);
 
+    // Set the target voltage when tuning. Will be silently clamped to the safe
+    // limit.
+    void
+    set_tune_target_voltage(float target_voltage);
+
     // True while a tuning session is in progress.
     bool
     tune_active();
