@@ -315,6 +315,9 @@ class IndxToolboardHeater:
         gcode.register_command("INDX_SET_PID", self.cmd_SET_PID)
         gcode.register_command("INDX_SET_CYCLE_LIMIT", self.cmd_SET_CYCLE_LIMIT)
         gcode.register_command(
+            "INDX_SET_TUNE_TARGET_VOLTAGE", self.cmd_SET_TUNE_TARGET_VOLTAGE
+        )
+        gcode.register_command(
             "INDX_SET_IR_SENSOR_PARAMS", self.cmd_SET_IR_SENSOR_PARAMS
         )
         gcode.register_command("INDX_CALIBRATE", self.cmd_CALIBRATE)
@@ -640,6 +643,12 @@ class IndxToolboardHeater:
             "indx_cycle_limit limit=%u", cq=self.cmd_queue
         )
         cmd.send([gcmd.get_int("LIMIT")])
+
+    def cmd_SET_TUNE_TARGET_VOLTAGE(self, gcmd):
+        cmd = self.toolboard.mcu.lookup_command(
+            "indx_tune_set_target_voltage target_voltage=%u", cq=self.cmd_queue
+        )
+        cmd.send([float_to_u32(gcmd.get_float("TARGET_VOLTAGE"))])
 
     def cmd_SET_IR_SENSOR_PARAMS(self, gcmd):
         cmd = self.toolboard.mcu.lookup_command(

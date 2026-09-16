@@ -334,6 +334,21 @@ DECL_COMMAND(command_indx_cycle_limit, "indx_cycle_limit limit=%u");
 // faults if the coil is being driven; tuning and heating are mutually
 // exclusive. Advanced to completion by tune_step() from indx_heater_task.
 extern "C" void
+command_indx_tune_set_target_voltage(uint32_t *args) {
+    if (!indx_heater_instance)
+        return;
+
+    auto target_voltage = *reinterpret_cast<float *>(&args[0]);
+    indx_heater_instance->coil_driver_inst.set_tune_target_voltage(
+        target_voltage);
+}
+DECL_COMMAND(command_indx_tune_set_target_voltage,
+             "indx_tune_set_target_voltage target_voltage=%u");
+
+// Start the on-device coil-driver auto-tune (commissioning). start_tune()
+// faults if the coil is being driven; tuning and heating are mutually
+// exclusive. Advanced to completion by tune_step() from indx_heater_task.
+extern "C" void
 command_indx_tune_coil(uint32_t *args) {
     if (!indx_heater_instance)
         return;
