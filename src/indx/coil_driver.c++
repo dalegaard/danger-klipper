@@ -1134,6 +1134,25 @@ coil_driver::start_tune(bool want_details) {
     tuner.start(want_details);
 }
 
+void
+coil_driver::set_tune_target_voltage(float target_voltage) {
+    if (target_voltage < 0) {
+        shutdown("Negative tuning voltage target requested");
+    }
+    uint32_t new_target_scaler_value =
+        (uint32_t)(64.0f * target_voltage * OV_DIVIDER_R2 /
+                       ((OV_DIVIDER_R1 + OV_DIVIDER_R2) * OV_VDDANA) +
+                   0.5f) -
+        1;
+    if (new_target_scaler_value > TUNE_TARGET_SCALER_VALUE) {
+        new_target_scaler_value = TUNE_TARGET_SCALER_VALUE;
+    }
+
+    output("TARGET UPDATE %u => %u", AC->SCALER[1].reg,
+           new_target_scaler_value);
+    AC->SCALER[1].reg = AC_SCALER_VALUE(new_target_scaler_value);
+}
+
 bool
 coil_driver::tune_active() {
     return tuner.active();
