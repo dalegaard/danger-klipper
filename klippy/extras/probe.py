@@ -18,8 +18,6 @@ from klippy.extras.gcode_macro import Template
 from klippy.gcode import GCodeCommand
 from klippy.toolhead import ToolHead
 
-from . import manual_probe
-
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
 consider reducing the Z axis minimum position so the probe
@@ -378,6 +376,12 @@ class ProbeList:
             probe = self.printer.lookup_object("probe", None)
             if probe is not None:
                 self.default_probe = ("probe", probe)
+            else:
+                probe = self.get_probe("manual")
+                if probe is not None:
+                    probe.is_default_probe = True
+                    self.default_probe = (probe.probe_name, probe)
+                    probe.register_commands(None)
 
     def get_status(self, eventtime):
         return {
@@ -402,17 +406,21 @@ class ProbeList:
         gcmd,
         default=sentinel,
         no_default_error="No default probe registered, explicitly select probe by passing `PROBE=`",
+        default_probe_name=None,
     ) -> PrinterProbe:
-        requested_probe = gcmd.get("PROBE", None)
+        requested_probe = gcmd.get("PROBE", default_probe_name)
+        if gcmd.get("METHOD", "automatic").lower() == "manual":
+            requested_probe = "manual"
         if requested_probe is not None:
             if requested_probe in self.probes:
                 return self.probes[requested_probe]
             else:
                 raise gcmd.error(f"Unknown requested probe {requested_probe}")
         else:
-            if self.default_probe is None and default is sentinel:
+            probe = self.get_default_probe()
+            if probe is None and default is sentinel:
                 raise gcmd.error(no_default_error)
-            return (self.default_probe and self.default_probe[1]) or default
+            return probe or default
 
     def get_config_probe(self, config, default=sentinel) -> PrinterProbe:
         probe_name = config.get("probe", None)
@@ -457,10 +465,19 @@ class ProbeList:
 
 
 class PrinterProbe:
-    def __init__(self, config, mcu_probe):
+    def __init__(
+        self,
+        config,
+        mcu_probe,
+        default_z_offset=configfile.sentinel,
+        probe_name=None,
+        register_as_probe=None,
+    ):
         self.printer = config.get_printer()
         self.name = config.get_name()
-        self.probe_name = self.name.split(" ")[-1]
+        self.probe_name = (
+            probe_name if probe_name is not None else self.name.split(" ")[-1]
+        )
         self.mcu_probe = mcu_probe
         self.speed = config.getfloat("speed", 5.0, above=0.0)
         self.retry_speed: float = config.getfloat(
@@ -469,7 +486,7 @@ class PrinterProbe:
         self.lift_speed = config.getfloat("lift_speed", self.speed, above=0.0)
         self.x_offset = config.getfloat("x_offset", 0.0)
         self.y_offset = config.getfloat("y_offset", 0.0)
-        self.z_offset = config.getfloat("z_offset")
+        self.z_offset = config.getfloat("z_offset", default_z_offset)
         self.drop_first_result = config.getboolean("drop_first_result", False)
         self.probe_calibrate_z = 0.0
         self.multi_probe_count = 0
@@ -505,7 +522,11 @@ class PrinterProbe:
             "samples_tolerance_retries", 0, minval=0
         )
         # Register z_virtual_endstop pin
-        self.is_default_probe = config.getboolean("register_as_probe", True)
+        self.is_default_probe = (
+            config.getboolean("register_as_probe", True)
+            if register_as_probe is None
+            else register_as_probe
+        )
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip(self.probe_name, self)
         if self.is_default_probe and self.probe_name != "probe":
@@ -606,7 +627,14 @@ class PrinterProbe:
             raise pins.error("Probe virtual endstop only useful as endstop pin")
         if pin_params["invert"] or pin_params["pullup"]:
             raise pins.error("Can not pullup/invert probe virtual endstop")
+        if not hasattr(self.mcu_probe, "get_mcu"):
+            raise pins.error("This probe cannot be used as a virtual endstop")
         return self.mcu_probe
+
+    def cancel_probe(self):
+        cancel = getattr(self.mcu_probe, "cancel_probe", None)
+        if cancel is not None:
+            cancel()
 
     def get_lift_speed(self, gcmd=None):
         if gcmd is not None:
@@ -725,6 +753,7 @@ class PrinterProbe:
     def run_probe(
         self, gcmd: GCodeCommand, retry_session: Optional[RetrySession] = None
     ) -> list[float]:
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         sample_count = gcmd.get_int("SAMPLES", self.sample_count, minval=1)
         samples_tolerance = gcmd.get_float(
@@ -734,50 +763,52 @@ class PrinterProbe:
             "SAMPLES_TOLERANCE_RETRIES", self.samples_retries, minval=0
         )
         samples_result = gcmd.get("SAMPLES_RESULT", self.samples_result)
-        with multi_probe_session(
-            self, ProbingContext(always_restore_toolhead=True, gcmd=gcmd)
-        ):
-            # Initialize probe retry state
-            if retry_session is None:
-                local_retry_session = self.retry_session
-                self.retry_session.start(gcmd)
+        try:
+            with multi_probe_session(
+                self, ProbingContext(always_restore_toolhead=True, gcmd=gcmd)
+            ):
+                # Initialize probe retry state
+                if retry_session is None:
+                    local_retry_session = self.retry_session
+                    self.retry_session.start(gcmd)
+                    toolhead = self.printer.lookup_object("toolhead")
+                    self.retry_session.set_position(toolhead.get_position())
+                else:
+                    local_retry_session: RetrySession = retry_session
+                # save X and Y position
                 toolhead = self.printer.lookup_object("toolhead")
-                self.retry_session.set_position(toolhead.get_position())
-            else:
-                local_retry_session: RetrySession = retry_session
-            # save X and Y position
-            toolhead = self.printer.lookup_object("toolhead")
-            request_pos = toolhead.get_position()[:2]
-            retries = 0
-            positions = []
-            self._discard_first_result(speed, local_retry_session, gcmd)
-            while len(positions) < sample_count:
-                # Probe position with retries
-                pos = self._run_probe_with_retries(
-                    speed, local_retry_session, gcmd
-                )
-                positions.append(pos)
-                # Check samples tolerance
-                z_positions = [p[2] for p in positions]
-                if max(z_positions) - min(z_positions) > samples_tolerance:
-                    if retries >= samples_retries:
-                        raise gcmd.error(
-                            "Probe samples exceed samples_tolerance"
-                        )
-                    gcmd.respond_info(
-                        "Probe samples exceed tolerance. Retrying..."
+                request_pos = toolhead.get_position()[:2]
+                retries = 0
+                positions = []
+                self._discard_first_result(speed, local_retry_session, gcmd)
+                while len(positions) < sample_count:
+                    # Probe position with retries
+                    pos = self._run_probe_with_retries(
+                        speed, local_retry_session, gcmd
                     )
-                    retries += 1
-                    positions = []
-                # Retract
-                if len(positions) < sample_count:
-                    self._retract(gcmd)
+                    positions.append(pos)
+                    # Check samples tolerance
+                    z_positions = [p[2] for p in positions]
+                    if max(z_positions) - min(z_positions) > samples_tolerance:
+                        if retries >= samples_retries:
+                            raise gcmd.error(
+                                "Probe samples exceed samples_tolerance"
+                            )
+                        gcmd.respond_info(
+                            "Probe samples exceed tolerance. Retrying..."
+                        )
+                        retries += 1
+                        positions = []
+                    # Retract
+                    if len(positions) < sample_count:
+                        self._retract(gcmd)
+            # Calculate and return result
+            if samples_result == "median":
+                return self._calc_median(positions)
+            return self._calc_mean(positions)
+        finally:
             if retry_session is None:
                 self.retry_session.end()
-        # Calculate and return result
-        if samples_result == "median":
-            return self._calc_median(positions)
-        return self._calc_mean(positions)
 
     cmd_PROBE_help = "Probe Z-height at current XY position"
 
@@ -812,6 +843,7 @@ class PrinterProbe:
     cmd_PROBE_ACCURACY_help = "Probe Z-height accuracy at current XY position"
 
     def cmd_PROBE_ACCURACY(self, gcmd: GCodeCommand):
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = self.get_lift_speed(gcmd)
         sample_count = gcmd.get_int("SAMPLES", 10, minval=1)
@@ -835,25 +867,27 @@ class PrinterProbe:
             )
         )
         # Probe bed sample_count times
-        with multi_probe_session(
-            self, ProbingContext(always_restore_toolhead=True, gcmd=gcmd)
-        ):
-            # Initialize probe retry state
-            self.retry_session.start(gcmd)
-            # force FAIL behavior for PROBE_ACCURACY, never accept bad probes
-            self.retry_session.set_retry_strategy(RetryStrategy.FAIL)
-            self.retry_session.set_position(toolhead.get_position())
-            positions = []
-            self._discard_first_result(speed, self.retry_session, gcmd)
-            while len(positions) < sample_count:
-                # Probe position
-                pos = self._run_probe_with_retries(
-                    speed, self.retry_session, gcmd
-                )
-                positions.append(pos)
-                # Retract
-                self._retract(gcmd)
-        self.retry_session.end()
+        try:
+            with multi_probe_session(
+                self, ProbingContext(always_restore_toolhead=True, gcmd=gcmd)
+            ):
+                # Initialize probe retry state
+                self.retry_session.start(gcmd)
+                # force FAIL behavior for PROBE_ACCURACY, never accept bad probes
+                self.retry_session.set_retry_strategy(RetryStrategy.FAIL)
+                self.retry_session.set_position(toolhead.get_position())
+                positions = []
+                self._discard_first_result(speed, self.retry_session, gcmd)
+                while len(positions) < sample_count:
+                    # Probe position
+                    pos = self._run_probe_with_retries(
+                        speed, self.retry_session, gcmd
+                    )
+                    positions.append(pos)
+                    # Retract
+                    self._retract(gcmd)
+        finally:
+            self.retry_session.end()
         # Calculate maximum, minimum and average values
         max_value = max([p[2] for p in positions])
         min_value = min([p[2] for p in positions])
@@ -895,7 +929,13 @@ class PrinterProbe:
     cmd_PROBE_CALIBRATE_help = "Calibrate the probe's z_offset"
 
     def cmd_PROBE_CALIBRATE(self, gcmd):
-        manual_probe.verify_no_manual_probe(self.printer)
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
+        reference = ProbeList.get_list(self.printer).get_probe(
+            gcmd.get("REFERENCE_PROBE", "manual")
+        )
+        if reference is None:
+            raise gcmd.error("No reference probe registered")
+        reference_offsets = reference.get_offsets()
         # Perform initial probe
         lift_speed = self.get_lift_speed(gcmd)
         curpos = self.run_probe(gcmd)
@@ -903,14 +943,13 @@ class PrinterProbe:
         self.probe_calibrate_z = curpos[2]
         curpos[2] += 5.0
         self._move(curpos, lift_speed)
-        # Move the nozzle over the probe point
-        curpos[0] += self.x_offset
-        curpos[1] += self.y_offset
+        # Move the reference probe over the initial contact point
+        curpos[0] += self.x_offset - reference_offsets[0]
+        curpos[1] += self.y_offset - reference_offsets[1]
         self._move(curpos, self.speed)
-        # Start manual probe
-        manual_probe.ManualProbeHelper(
-            self.printer, gcmd, self.probe_calibrate_finalize
-        )
+        reference_pos = list(reference.run_probe(gcmd))
+        reference_pos[2] -= reference_offsets[2]
+        self.probe_calibrate_finalize(reference_pos)
 
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
         offset = self.gcode_move.get_status()["homing_origin"].z
@@ -1034,13 +1073,13 @@ class ProbePointsHelper:
     ):
         self.printer = config.get_printer()
         self.finalize_callback = finalize_callback
-        # Optional per-pass result: (offsets, positions), or None on manual abort.
+        # Optional per-pass result: (offsets, positions), or None on cancellation.
         self.completion = completion
         self._completion_result = None
-        self._manual_probe_helper = None
+        self._active_probe = None
+        self._cancelled = False
         self.probe_points = default_points
         self.name = config.get_name()
-        self.gcode = self.printer.lookup_object("gcode")
         # Read config settings
         if default_points is None or config.get(option_name, None) is not None:
             self.probe_points = config.getlists(
@@ -1178,6 +1217,7 @@ class ProbePointsHelper:
         return False
 
     def start_probe(self, gcmd: GCodeCommand):
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
         try:
             self._start_probe(gcmd)
         except Exception:
@@ -1187,19 +1227,13 @@ class ProbePointsHelper:
 
     def _start_probe(self, gcmd: GCodeCommand):
         self._completion_result = None
+        self._cancelled = False
         self.retry_session.start(gcmd)
         self.retry_session.reset_all()
-        manual_probe.verify_no_manual_probe(self.printer)
         # Lookup objects
         plist = ProbeList.get_list(self.printer)
-        probe = plist.get_command_probe(gcmd, None)
+        probe = plist.get_command_probe(gcmd)
         method = gcmd.get("METHOD", "automatic").lower()
-        if method != "manual" and (probe is None and plist.get_all()):
-            raise gcmd.error(
-                "No default probe, but named probes are available. "
-                "Either select a probe with PROBE= or use METHOD=manual "
-                "to enter manual probing mode."
-            )
 
         self.results = []
         self._probe_pass_direction_reversed = self.start_reverse
@@ -1217,8 +1251,8 @@ class ProbePointsHelper:
         if enforce_lift_speed is not None:
             self.enforce_lift_speed = enforce_lift_speed
 
-        if probe is not None and method == "rapid_scan":
-            mcu_probe = probe.mcu_probe
+        if method == "rapid_scan":
+            mcu_probe = getattr(probe, "mcu_probe", None)
             can_scan = hasattr(mcu_probe, "begin_collect_distance")
             if can_scan:
                 return self._start_rapid_scan(gcmd, probe)
@@ -1228,30 +1262,29 @@ class ProbePointsHelper:
                 )
                 method = "automatic"
 
-        if probe is None or method != "automatic":
-            # Manual probe
-            self.lift_speed = self.speed
-            self.probe_offsets = (0.0, 0.0, 0.0)
-            self._manual_probe_start(gcmd)
-            return
-        # Perform automatic probing
         self.lift_speed = probe.get_lift_speed(gcmd)
         self.probe_offsets = probe.get_offsets()
         if self.horizontal_move_z < self.probe_offsets[2]:
             raise gcmd.error(
                 "horizontal_move_z can't be less than probe's z_offset"
             )
+        self._active_probe = probe
         try:
             with multi_probe_session(probe, ProbingContext(gcmd=gcmd)):
                 while True:
+                    self._check_cancelled(gcmd)
                     done = self._move_next()
+                    self._check_cancelled(gcmd)
                     if done:
                         break
                     pos = probe.run_probe(gcmd, self.retry_session)
+                    self._check_cancelled(gcmd)
                     logging.info(f"Probe pos:{pos}")
                     self._store_probe_result(pos)
         finally:
+            self._active_probe = None
             self.retry_session.end()
+        self._check_cancelled(gcmd)
         self._complete_probe(self._completion_result)
 
     def _start_rapid_scan(self, gcmd: GCodeCommand, probe: PrinterProbe):
@@ -1279,10 +1312,12 @@ class ProbePointsHelper:
             "axis_twist_compensation", None
         )
 
+        self._active_probe = probe
         try:
             with multi_probe_session(probe, ProbingContext(gcmd=gcmd)):
                 done = False
                 while not done:
+                    self._check_cancelled(gcmd)
                     # If needed, raise up so we can move down to pull out backlash
                     cur_pos = toolhead.get_position()
                     if cur_pos[2] < scan_height + 0.5:
@@ -1379,6 +1414,7 @@ class ProbePointsHelper:
                             )
                         self._store_probe_result((point[0], point[1], z))
 
+                    self._check_cancelled(gcmd)
                     if self.completion is not None:
                         self._completion_result = (
                             self.probe_offsets,
@@ -1389,6 +1425,7 @@ class ProbePointsHelper:
                         res = self.finalize_callback(
                             self.probe_offsets, self.results
                         )
+                    self._check_cancelled(gcmd)
                     self.results = []
                     if isinstance(res, (int, float)):
                         if res == 0:
@@ -1408,7 +1445,9 @@ class ProbePointsHelper:
                         )
 
         finally:
+            self._active_probe = None
             self.retry_session.end()
+        self._check_cancelled(gcmd)
         self._complete_probe(self._completion_result)
 
     def _generate_rapid_path(self) -> list[tuple[tuple[float, float], bool]]:
@@ -1432,44 +1471,19 @@ class ProbePointsHelper:
             points.append(((x, y), True))
         return points
 
-    def _manual_probe_start(self, gcmd):
-        try:
-            done = self._move_next()
-            if done:
-                self.retry_session.end()
-                self._complete_probe(self._completion_result)
-            else:
-                self._manual_probe_helper = manual_probe.ManualProbeHelper(
-                    self.printer,
-                    gcmd,
-                    self._manual_probe_finalize,
-                    pass_gcmd=True,
-                )
-        except Exception:
-            self.retry_session.end()
-            self._complete_probe(None)
-            raise
-
-    def _manual_probe_finalize(self, kin_pos, gcmd):
-        self._manual_probe_helper = None
-        if kin_pos is None:
-            self.retry_session.end()
-            self._complete_probe(None)
-            return
-        self._store_probe_result(kin_pos)
-        self._manual_probe_start(gcmd)
-
     def _complete_probe(self, result):
         if self.completion is not None and not self.completion.test():
             self.completion.complete(result)
 
+    def _check_cancelled(self, gcmd):
+        if self._cancelled:
+            raise gcmd.error("Probing cancelled")
+
     def cancel(self):
-        helper = self._manual_probe_helper
-        self._manual_probe_helper = None
-        if helper is not None:
-            helper.finalize(False)
-        self.retry_session.end()
-        self._complete_probe(None)
+        self._cancelled = True
+        cancel = getattr(self._active_probe, "cancel_probe", None)
+        if cancel is not None:
+            cancel()
 
 
 def load_config(config):
